@@ -52,45 +52,49 @@ def home():
 @app.post("/predict")
 async def predict(file: UploadFile = File(...), model_type: str = Form("transfer")):
     try:
-        # Read image file bytes
+        # Read uploaded image
         contents = await file.read()
         img = Image.open(BytesIO(contents)).convert("RGB")
-        
-        # Resize image according to model requirement (e.g., 128x128)
+
+        # Resize image
         img = img.resize((128, 128))
-        
-        # Convert to array and normalize
+
+        # Convert to array (NO external normalization)
         x = image.img_to_array(img)
         x = np.expand_dims(x, axis=0)
-        x = x / 255.0  # Normalization
 
-        # Select model based on user choice
+        # Select model
         if model_type == "scratch":
-            if 'custom_cnn_model' not in globals():
-                raise HTTPException(status_code=500, detail="Custom CNN model not loaded.")
-            preds = custom_cnn_model.predict(x)
+            model = custom_cnn_model
             model_used_name = "Custom CNN Model"
-        else:
-            if 'transfer_model' not in globals():
-                raise HTTPException(status_code=500, detail="Transfer Learning model not loaded.")
-            preds = transfer_model.predict(x)
+
+        elif model_type == "transfer":
+            model = transfer_model
             model_used_name = "MobileNetV2 Transfer Learning"
 
-        # Get highest probability index safely
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid model type. Use scratch or transfer."
+            )
+
+        # Predict
+        preds = model.predict(x, verbose=0)
+
         predicted_index = int(np.argmax(preds[0]))
         confidence = float(np.max(preds[0])) * 100
 
-        # Safe guard for class index out of bounds
-        if predicted_index < len(CLASS_NAMES):
-            class_name = CLASS_NAMES[predicted_index]
-        else:
-            class_name = f"Class_{predicted_index}"
+        # Get correct class name
+        class_name = CLASS_NAMES[predicted_index]
 
         return {
             "class_name": class_name,
             "confidence": round(confidence, 2),
             "model_used": model_used_name
         }
+
+    except HTTPException:
+        raise
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
