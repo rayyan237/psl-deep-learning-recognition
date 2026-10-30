@@ -1,13 +1,16 @@
-from fastapi import FastAPI, UploadFile, File, Form
-from fastapi.middleware.cors import CORSMiddleware
-import tensorflow as tf
+import os
 import numpy as np
-import io
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from tensorflow.keras.models import load_model
+from tensorflow.keras.preprocessing import image
+import uvicorn
+from io import BytesIO
 from PIL import Image
 
-app = FastAPI()
+app = FastAPI(title="PSL Recognition API")
 
-# CORS Enable karein taake Vercel ka frontend isay access kar sakay
+# Enable CORS for frontend connection
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -16,41 +19,81 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-print("Loading Model A (Custom CNN)...")
-model_scratch = tf.keras.models.load_model('psl_custom_cnn.h5')
+# Exact 37 Classes matching your dataset folders
+CLASS_NAMES = [
+    'Ain', 'Aliph', 'aRay', 'Bari yeh', 'Bay', 'Chay', 'Chhoti yeh', 
+    'Daal', 'Ddaal', 'Dhaal', 'Dhuaad', 'Djay', 'Fay', 'Gaaf', 'Ghain', 
+    'Hamza', 'Hay', 'hey', 'Jeem', 'Kaaf', 'Khay', 'Laam', 'Meem', 
+    'Noon', 'Pay', 'Quaaf', 'Ray', 'Seen', 'Sheen', 'Suaad', 'Tay', 
+    'Tey', 'Thay', 'Toay_n', 'Vao', 'Zay', 'Zoay_n'
+]
 
-print("Loading Model B (MobileNetV2 Transfer Learning)...")
-model_transfer = tf.keras.models.load_model('psl_transfer_learning.h5')
+# Load Models safely
+MODEL_DIR = os.path.dirname(os.path.abspath(__file__))
+custom_cnn_path = os.path.join(MODEL_DIR, "psl_custom_cnn.h5")
+transfer_model_path = os.path.join(MODEL_DIR, "psl_transfer_learning.h5")
 
-# Apne 37 classes ki list yahan pure likhein
-CLASS_NAMES = ['Aliph', 'Bay', 'Tey', 'Jeem', 'Seen', 'Meem'] # Isay apne saare 37 classes se complete kar lein
+try:
+    custom_cnn_model = load_model(custom_cnn_path)
+    print("Custom CNN Model Loaded Successfully!")
+except Exception as e:
+    print(f"Error loading Custom CNN: {e}")
+
+try:
+    transfer_model = load_model(transfer_model_path)
+    print("Transfer Learning Model Loaded Successfully!")
+except Exception as e:
+    print(f"Error loading Transfer Learning Model: {e}")
 
 @app.get("/")
 def home():
-    return {"status": "PSL Multi-Model API is running successfully on Render!"}
+    return {"status": "PSL FastAPI Backend is Running Successfully!"}
 
 @app.post("/predict")
 async def predict(file: UploadFile = File(...), model_type: str = Form("transfer")):
-    contents = await file.read()
-    image = Image.open(io.BytesIO(contents)).convert("RGB")
-    
-    if model_type == "transfer":
-        image = image.resize((128, 128))
-        img_array = np.array(image) / 127.5 - 1.0 # MobileNetV2 preprocessing
-        active_model = model_transfer
-    else:
-        image = image.resize((128, 128))
-        img_array = np.array(image) / 255.0 # Custom CNN preprocessing
-        active_model = model_scratch
+    try:
+        # Read image file bytes
+        contents = await file.read()
+        img = Image.open(BytesIO(contents)).convert("RGB")
         
-    img_array = np.expand_dims(img_array, axis=0)
-    
-    preds = active_model.predict(img_array)
-    pred_class_idx = np.argmax(preds[0])
-    confidence = float(np.max(preds[0])) * 100
-    
-    return {
-        "model_used": "MobileNetV2 (Transfer)" if model_type == "transfer" else "Custom CNN",
-        "class_name": CLASS_NAMES[pred_class_idx % len(CLASS_NAMES)],
-        "confidence": round(confidence, 2)
-    }
+        # Resize image according to model requirement (e.g., 128x128)
+        img = img.resize((128, 128))
+        
+        # Convert to array and normalize
+        x = image.img_to_array(img)
+        x = np.expand_dims(x, axis=0)
+        x = x / 255.0  # Normalization
+
+        # Select model based on user choice
+        if model_type == "scratch":
+            if 'custom_cnn_model' not in globals():
+                raise HTTPException(status_code=500, detail="Custom CNN model not loaded.")
+            preds = custom_cnn_model.predict(x)
+            model_used_name = "Custom CNN Model"
+        else:
+            if 'transfer_model' not in globals():
+                raise HTTPException(status_code=500, detail="Transfer Learning model not loaded.")
+            preds = transfer_model.predict(x)
+            model_used_name = "MobileNetV2 Transfer Learning"
+
+        # Get highest probability index safely
+        predicted_index = int(np.argmax(preds[0]))
+        confidence = float(np.max(preds[0])) * 100
+
+        # Safe guard for class index out of bounds
+        if predicted_index < len(CLASS_NAMES):
+            class_name = CLASS_NAMES[predicted_index]
+        else:
+            class_name = f"Class_{predicted_index}"
+
+        return {
+            "class_name": class_name,
+            "confidence": round(confidence, 2),
+            "model_used": model_used_name
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+if __name__ == "__main__":
+    uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=True)
